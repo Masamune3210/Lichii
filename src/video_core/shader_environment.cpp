@@ -178,6 +178,10 @@ static std::string_view StageToPrefix(Shader::Stage stage) {
         return "cs";
     case Shader::Stage::VertexA:
         return "va";
+    case Shader::Stage::Task:
+        return "ts";
+    case Shader::Stage::Mesh:
+        return "ms";
     default:
         return "uk";
     }
