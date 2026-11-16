@@ -108,6 +108,13 @@ problem, not a native shader capture or CMake configuration error.
 - **Fix commit `426c2e87`** on `nx2`: `ffx_runtime.cpp` now includes `<bit>` and uses a local `ResolveFfxProc<Function>` helper, with function-pointer size assertion, null handling, and `std::bit_cast` for the four exports, leaving the existing FSR runtime verification and load/unload behavior unchanged. GCC's error policy has not been relaxed.
 - **Build and runtime still unverified after the fix**. Rerun the same `Build-Eden-UCRT64-GCC.cmd` incrementally; do not clear the build directory.
 
+## Third UCRT64 GCC failure: `_ReturnAddress` unresolved during CLI link (2026-11-16)
+
+- Next Windows UCRT64 GCC 16.2 Ninja run progressed to `[823/981]`, then `bin/eden-cli.exe` failed to link. The command compiled and linked `src/lichii_cmd` objects, but the `common` static archive's `src/common/windows/crash_handler.cpp.obj` contained **two undefined references to `_ReturnAddress`**. They came from the `OnAbort` and `OnInvalidParameter` CRT fail-fast hooks, whose source used an MSVC-only intrinsic without a GCC alternative.
+- **Lichii `nx2` fix `bf09ecf6`**: define `CRASH_HANDLER_CALLER_ADDRESS()` as MSVC `_ReturnAddress()` under `_MSC_VER`, or GNU `__builtin_extract_return_addr(__builtin_return_address(0))` otherwise. Use it directly in both fail-fast hooks to preserve the original *caller-of-handler* return address, with no extra helper stack frame. Existing minidump/crash logging behavior and linker options are unchanged.
+- The target binary's current name `eden-cli.exe` follows the existing CMake output setting and is not itself the link failure. The shell build script's final GUI check targets `bin/lichii.exe` (previous fix); this is separate from the CLI link step.
+- **Build after `bf09ecf6` not yet rerun or verified.** Pull `nx2`, rerun `Build-Eden-UCRT64-GCC.cmd` incrementally. No clean build needed.
+
 ## Verification
 
 Source-level inspection and edits completed in `Masamune3210/Lichii`,
