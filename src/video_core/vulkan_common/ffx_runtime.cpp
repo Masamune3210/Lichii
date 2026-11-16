@@ -10,6 +10,7 @@
 
 #ifdef _WIN32
 #include <array>
+#include <bit>
 #include <cstdio>
 #include <fstream>
 #include <string>
@@ -124,6 +125,16 @@ struct Loaded : Api {
 std::mutex mutex;
 std::weak_ptr<const Loaded> current;
 
+// GetProcAddress returns generic FARPROC, not a precisely typed API entrypoint.
+// On Windows, copying the function-pointer representation avoids an incompatible
+// function-pointer cast under MinGW GCC -Werror=cast-function-type.
+template <typename Function>
+Function ResolveFfxProc(HMODULE module, const char* name) {
+    static_assert(sizeof(Function) == sizeof(FARPROC));
+    const FARPROC address = GetProcAddress(module, name);
+    return address == nullptr ? nullptr : std::bit_cast<Function>(address);
+}
+
 /// Once every file checks out it isn't hashed again this session; a failed check is retried, so
 /// files downloaded after a game ran are used by the next one.
 bool FilesVerified() {
@@ -174,12 +185,10 @@ std::shared_ptr<const Api> Acquire() {
     }
     auto loaded = std::make_unique<Loaded>();
     loaded->module = module;
-    loaded->create_context =
-        reinterpret_cast<PfnFfxCreateContext>(GetProcAddress(module, "ffxCreateContext"));
-    loaded->destroy_context =
-        reinterpret_cast<PfnFfxDestroyContext>(GetProcAddress(module, "ffxDestroyContext"));
-    loaded->query = reinterpret_cast<PfnFfxQuery>(GetProcAddress(module, "ffxQuery"));
-    loaded->dispatch = reinterpret_cast<PfnFfxDispatch>(GetProcAddress(module, "ffxDispatch"));
+    loaded->create_context = ResolveFfxProc<PfnFfxCreateContext>(module, "ffxCreateContext");
+    loaded->destroy_context = ResolveFfxProc<PfnFfxDestroyContext>(module, "ffxDestroyContext");
+    loaded->query = ResolveFfxProc<PfnFfxQuery>(module, "ffxQuery");
+    loaded->dispatch = ResolveFfxProc<PfnFfxDispatch>(module, "ffxDispatch");
     if (!loaded->create_context || !loaded->destroy_context || !loaded->query ||
         !loaded->dispatch) {
         LOG_WARNING(Render_Vulkan, "AMD FSR 4: the FidelityFX loader lacks its exports");
