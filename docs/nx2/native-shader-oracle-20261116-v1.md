@@ -73,6 +73,34 @@ provenance in `oracle-manifest.json`.
 - The capture does **not** change shader translation, Maxwell output,
   resource bindings, GPU state, or rendering behavior.
 
+## Windows UCRT64 GCC build blocker (2026-11-16)
+
+User build using `Build-Eden-UCRT64-GCC.cmd` on `nx2` at commit
+`504128d19fb6155ce957e43a7e2958253de3c64c` successfully
+configured CMake 4.5.0 with GCC 16.2.0 and Ninja 1.13.2 but stopped
+at `[15/1849]` on `src/common/nx2_sampler.cpp`:
+`-Werror=cast-function-type` for six `GetProcAddress` conversions
+(`NtQueryInformationThread`, `GetThreadDescription`,
+`SymSetOptions`, `SymInitialize`, `SymFromAddr`,
+`SymRefreshModuleList`). This is an unrelated pre-existing GCC portability
+problem, not a native shader capture or CMake configuration error.
+
+- Commit `4686342c`: introduces `ResolveProc<Function>` with a null
+  check, equal-pointer-size assertion, and `std::bit_cast` to preserve
+  the Windows API function pointer representation without the prohibited
+  incompatible-function-pointer `reinterpret_cast`. The six sites use
+  this shared loader. No warning policy is disabled.
+- Commit `ceecace1`: fixes the existing UCRT64 shell build script's
+  final expected output from the old `bin/eden.exe` to the actual
+  CMake target `bin/lichii.exe`. The `.cmd` wrapper and build directory
+  remain unchanged. Existing legacy `YUZU_*` option warnings are
+  nonfatal and are not part of this failure.
+- The standalone C++20 function-pointer `std::bit_cast` pattern passed
+  a warning-as-error syntax check with GCC 14.2 on Linux, but the actual
+  Lichii Windows UCRT64 build **has not been rerun or confirmed**.
+  Rerun `./Build-Eden-UCRT64-GCC.cmd` after pulling `nx2`.
+  Ninja should reuse already completed objects; no clean rebuild requested.
+
 ## Verification
 
 Source-level inspection and edits completed in `Masamune3210/Lichii`,
