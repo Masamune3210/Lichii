@@ -100,9 +100,34 @@ if [[ -f "$BUILD_DIR/CMakeCache.txt" ]]; then
     fi
 fi
 
+# The MSYS /usr prefix is NOT the MinGW UCRT64 runtime. CMake also searches
+# CMAKE_INSTALL_PREFIX for dependencies, so staging under /usr can let host
+# MSYS libraries (such as librt.a) enter a native UCRT64 link.
+MSYS_USR_PREFIX="$(cygpath -am /usr)"
+msys_usr_lower="${MSYS_USR_PREFIX,,}"
+INSTALL_PREFIX="$(normalize_windows_path "$BUILD_DIR/install")"
+
+# CMake caches absolute library paths. Invalidate only earlier selections
+# inside the incompatible MSYS library tree; retain all existing Ninja objects.
+declare -a stale_library_cache_args=()
+if [[ -f "$BUILD_DIR/CMakeCache.txt" ]]; then
+    while IFS= read -r cache_entry; do
+        [[ "$cache_entry" == *:*"="* ]] || continue
+        cache_key="${cache_entry%%:*}"
+        [[ "$cache_key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+        cache_value="${cache_entry#*=}"
+        if [[ "${cache_value,,}" == *"$msys_usr_lower/lib/"* ]]; then
+            printf 'Dropping incompatible MSYS library cache key: %s\n' "$cache_key"
+            stale_library_cache_args+=("-U$cache_key")
+        fi
+    done < "$BUILD_DIR/CMakeCache.txt"
+fi
+
 section "Configuring exactly along the GCC-standard CI route"
 
-cmake -S "$ROOT" -B "$BUILD_DIR" -G Ninja \
+cmake "${stale_library_cache_args[@]}" -S "$ROOT" -B "$BUILD_DIR" -G Ninja \
+    -DCMAKE_INSTALL_PREFIX="$INSTALL_PREFIX" \
+    -DCMAKE_IGNORE_PREFIX_PATH="$MSYS_USR_PREFIX" \
     -DBUILD_TESTING=OFF \
     -DYUZU_TESTS=OFF \
     -DCMAKE_BUILD_TYPE=Release \
@@ -120,7 +145,6 @@ cmake -S "$ROOT" -B "$BUILD_DIR" -G Ninja \
     -DYUZU_USE_BUNDLED_MOLTENVK=ON \
     -DYUZU_DISABLE_LLVM=ON \
     -DYUZU_STATIC_BUILD=ON \
-    -DCMAKE_INSTALL_PREFIX=/usr \
     -DYUZU_CMD=ON \
     -DYUZU_ROOM_STANDALONE=OFF \
     -DBUILD_ID=amd64 \
