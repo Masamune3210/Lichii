@@ -101,6 +101,13 @@ problem, not a native shader capture or CMake configuration error.
   Rerun `./Build-Eden-UCRT64-GCC.cmd` after pulling `nx2`.
   Ninja should reuse already completed objects; no clean rebuild requested.
 
+## Second UCRT64 GCC failure: FidelityFX dynamic symbol loader (2026-11-16)
+
+- The next user GCC 16.2 build progressed past the earlier `nx2_sampler.cpp` function-pointer errors and reached the remaining Ninja `[11/999]` to `[23/999]` steps before stopping on **`src/video_core/vulkan_common/ffx_runtime.cpp:178-182`**.
+- Four `-Werror=cast-function-type` diagnostics were raised for `FARPROC` conversions to `PfnFfxCreateContext`, `PfnFfxDestroyContext`, `PfnFfxQuery`, and `PfnFfxDispatch`. All four were read as actual compiler errors, separate from repeated nonfatal `-Wconversion` warnings in `nx2_profile.h` and Vulkan files.
+- **Fix commit `426c2e87`** on `nx2`: `ffx_runtime.cpp` now includes `<bit>` and uses a local `ResolveFfxProc<Function>` helper, with function-pointer size assertion, null handling, and `std::bit_cast` for the four exports, leaving the existing FSR runtime verification and load/unload behavior unchanged. GCC's error policy has not been relaxed.
+- **Build and runtime still unverified after the fix**. Rerun the same `Build-Eden-UCRT64-GCC.cmd` incrementally; do not clear the build directory.
+
 ## Verification
 
 Source-level inspection and edits completed in `Masamune3210/Lichii`,
