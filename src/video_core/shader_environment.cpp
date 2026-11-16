@@ -682,7 +682,7 @@ std::shared_ptr<const LoweredNativeCode> GenericEnvironment::LowerNativeCode(
             std::ofstream metadata(metadata_path);
             if (metadata) {
                 metadata << fmt::format(
-                    "{{{{\n  \"schema\": \"lichii-native-ampere-v1\",\n"
+                    "{{\n  \"schema\": \"lichii-native-ampere-v1\",\n"
                     "  \"program_key\": \"{:016x}\",\n"
                     "  \"title_id\": \"{:016x}\",\n"
                     "  \"stage\": \"{}\",\n"
@@ -691,7 +691,7 @@ std::shared_ptr<const LoweredNativeCode> GenericEnvironment::LowerNativeCode(
                     "  \"header_size\": {},\n"
                     "  \"instruction_count\": {},\n"
                     "  \"native_size\": {}\n"
-                    "}}}}\n",
+                    "}}\n",
                     Shader::Ampere::NativeProgramKey(native),
                     Settings::GetCurrentProgramID(), StageToPrefix(stage),
                     program_base, program_base + native_header_size,
