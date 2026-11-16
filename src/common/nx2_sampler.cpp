@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -33,6 +34,20 @@ namespace {
 
 constexpr size_t MaxDepth = 40;
 
+// GetProcAddress returns FARPROC, whose deliberately generic signature differs
+// from the Win32/NT APIs resolved below. Bit-copying the pointer representation
+// keeps the ABI-compatible address while avoiding GCC's incompatible-function-
+// pointer cast diagnostic under -Werror=cast-function-type.
+template <typename Function>
+Function ResolveProc(HMODULE module, const char* name) {
+    static_assert(sizeof(Function) == sizeof(FARPROC));
+    if (module == nullptr) {
+        return nullptr;
+    }
+    const FARPROC address = GetProcAddress(module, name);
+    return address == nullptr ? nullptr : std::bit_cast<Function>(address);
+}
+
 struct Sample {
     unsigned thread;
     unsigned depth;
@@ -56,8 +71,7 @@ const NT_TIB* ThreadTib(HANDLE handle) {
         LONG base_priority;
     };
     using QueryFn = LONG(NTAPI*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
-    static const auto query = reinterpret_cast<QueryFn>(
-        GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtQueryInformationThread"));
+    static const auto query = ResolveProc<QueryFn>(GetModuleHandleA("ntdll.dll"), "NtQueryInformationThread");
     BasicInformation info{};
     if (query == nullptr || query(handle, 0, &info, sizeof(info), nullptr) < 0) {
         return nullptr;
@@ -103,8 +117,8 @@ bool Matches(const std::string& thread_name, const std::vector<std::string>& pat
 
 std::vector<Target> FindThreads(const std::vector<std::string>& patterns) {
     using GetThreadDescriptionFn = HRESULT(WINAPI*)(HANDLE, PWSTR*);
-    const auto get_description = reinterpret_cast<GetThreadDescriptionFn>(
-        GetProcAddress(GetModuleHandleA("KernelBase.dll"), "GetThreadDescription"));
+    const auto get_description = ResolveProc<GetThreadDescriptionFn>(
+        GetModuleHandleA("KernelBase.dll"), "GetThreadDescription");
     std::vector<Target> targets;
     if (get_description == nullptr) {
         return targets;
@@ -246,19 +260,16 @@ struct Symbolizer {
             if (dbghelp == nullptr) {
                 return result;
             }
-            const auto set_options =
-                reinterpret_cast<SymSetOptionsFn>(GetProcAddress(dbghelp, "SymSetOptions"));
-            const auto initialize =
-                reinterpret_cast<SymInitializeFn>(GetProcAddress(dbghelp, "SymInitialize"));
-            const auto symbol =
-                reinterpret_cast<SymFromAddrFn>(GetProcAddress(dbghelp, "SymFromAddr"));
+            const auto set_options = ResolveProc<SymSetOptionsFn>(dbghelp, "SymSetOptions");
+            const auto initialize = ResolveProc<SymInitializeFn>(dbghelp, "SymInitialize");
+            const auto symbol = ResolveProc<SymFromAddrFn>(dbghelp, "SymFromAddr");
             if (set_options == nullptr || initialize == nullptr || symbol == nullptr) {
                 return result;
             }
             set_options(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
             if (initialize(GetCurrentProcess(), nullptr, TRUE)) {
-                result = {symbol, reinterpret_cast<SymRefreshModuleListFn>(
-                                      GetProcAddress(dbghelp, "SymRefreshModuleList"))};
+                result = {symbol, ResolveProc<SymRefreshModuleListFn>(
+                                      dbghelp, "SymRefreshModuleList")};
             }
             return result;
         }();
