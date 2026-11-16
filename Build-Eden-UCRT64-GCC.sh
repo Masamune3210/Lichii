@@ -31,7 +31,7 @@ done
 
 cd "$ROOT"
 
-section "Eden CI-style UCRT64 GCC build"
+section "Lichii CI-style UCRT64 GCC build"
 printf 'Source:      %s\n' "$ROOT"
 printf 'Build:       %s\n' "$BUILD_DIR"
 printf 'Environment: %s\n' "$MSYSTEM"
@@ -134,11 +134,11 @@ cmake -S "$ROOT" -B "$BUILD_DIR" -G Ninja \
 section "Building with Ninja"
 cmake --build "$BUILD_DIR"
 
-EDEN_EXE="$BUILD_DIR/bin/eden.exe"
-[[ -f "$EDEN_EXE" ]] || die "The build ended without producing $EDEN_EXE"
+LICHII_EXE="$BUILD_DIR/bin/lichii.exe"
+[[ -f "$LICHII_EXE" ]] || die "The build ended without producing $LICHII_EXE"
 
 section "Checking runtime dependencies"
-imports="$(objdump -p "$EDEN_EXE" | awk '/DLL Name:/ {print $3}' | sort -fu)"
+imports="$(objdump -p "$LICHII_EXE" | awk '/DLL Name:/ {print $3}' | sort -fu)"
 printf '%s\n' "$imports"
 
 if printf '%s\n' "$imports" |
@@ -148,4 +148,4 @@ if printf '%s\n' "$imports" |
 fi
 
 section "BUILD SUCCEEDED"
-printf 'Executable:\n  %s\n' "$EDEN_EXE"
+printf 'Executable:\n  %s\n' "$LICHII_EXE"
