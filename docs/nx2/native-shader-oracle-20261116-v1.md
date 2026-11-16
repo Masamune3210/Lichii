@@ -115,6 +115,14 @@ problem, not a native shader capture or CMake configuration error.
 - The target binary's current name `eden-cli.exe` follows the existing CMake output setting and is not itself the link failure. The shell build script's final GUI check targets `bin/lichii.exe` (previous fix); this is separate from the CLI link step.
 - **Build after `bf09ecf6` not yet rerun or verified.** Pull `nx2`, rerun `Build-Eden-UCRT64-GCC.cmd` incrementally. No clean build needed.
 
+## Fourth UCRT64 failure: MSYS `librt.a` polluting GUI linker (2026-11-16)
+
+- After the `_ReturnAddress` fix, the user's Ninja build advanced through the CLI and reached GUI link target `bin/lichii.exe`. The linker took `C:/msys64/usr/lib/librt.a` (an **MSYS**, not **UCRT64**, import library) and failed to resolve `__imp_sem_close`, `__imp_sem_open`, `__imp_sem_post`, `__imp_sem_unlink`, and `__imp_sem_wait`.
+- An earlier configuration transcript showed `CMAKE_INSTALL_PREFIX: C:/msys64/usr`. The existing `Build-Eden-UCRT64-GCC.sh` explicitly passed `-DCMAKE_INSTALL_PREFIX=/usr` under MSYS2 UCRT64. CMake includes the install prefix in `find_library`/package searches; this creates an avenue for accidentally finding incompatible MSYS libraries. This is a grounded configuration flaw, although the exact dependency that introduced `librt.a` into `lichii.rsp` is **not yet identified**.
+- **Fix `a97a72ce`**, `Build-Eden-UCRT64-GCC.sh`: stage installs under `build-ci-ucrt64-gcc/install` rather than `/usr`; set `CMAKE_IGNORE_PREFIX_PATH` to the native MSYS `/usr` prefix so CMake cannot discover its libraries; read the existing `CMakeCache.txt` and supply targeted `-U<variable>` switches **only** for cached values that point inside the incompatible `/usr/lib` tree. Reconfigure in place and retain the existing Ninja object cache. This does not change compiler flags or relax warnings.
+- The accompanying `duplicate section ... QMetaTypeForType<...> has different size` message is distinct from the explicit `librt.a` undefined-reference failures; whether it affects runtime or is a nonfatal duplicate-COMDAT warning remains unverified.
+- **GUI link after `a97a72ce` has not yet been rerun**. Pull the branch and run the same `Build-Eden-UCRT64-GCC.cmd`. If `librt.a` still appears, inspect `build-ci-ucrt64-gcc/CMakeFiles/lichii.rsp` and cached link properties to identify which imported static target introduces it; do not assume the install prefix was the only issue.
+
 ## Verification
 
 Source-level inspection and edits completed in `Masamune3210/Lichii`,
