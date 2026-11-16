@@ -658,6 +658,66 @@ std::shared_ptr<const LoweredNativeCode> GenericEnvironment::LowerNativeCode(
         }
         if (status == Shader::Ampere::ProgramCaptureState::Result::Complete) break;
     }
+    // Oracle capture: write the ORIGINAL native 16-byte Ampere instructions before
+    // trap-guard validation, shader-cache lookup, and LowerToMaxwell. Previously
+    // this ran after lowering, losing programs when lowering failed. Keep the
+    // original bin/header naming convention for existing offline workflows.
+    if (static const char* const dump_directory = std::getenv("EDEN_NX2_SHADER_DUMP");
+        dump_directory != nullptr) {
+        const auto folder = std::filesystem::path{dump_directory};
+        const auto path = folder / fmt::format("{:016x}-{}-{:x}.bin", Shader::Ampere::NativeProgramKey(native),
+                                               source_header_size == 0 ? "cs" : "gfx", program_base);
+        if (!std::filesystem::exists(path)) {
+            std::filesystem::create_directories(folder);
+            std::ofstream dump(path, std::ios::binary);
+            dump.write(reinterpret_cast<const char*>(native.data()),
+                       native.size() * sizeof(Shader::Ampere::Instruction));
+        }
+        // A small sidecar keeps the stage and guest code address associated
+        // with the raw instruction stream. The .bin deliberately excludes
+        // the graphics header, which remains in .header.bin when present.
+        auto metadata_path = path;
+        metadata_path.replace_extension(".json");
+        if (!std::filesystem::exists(metadata_path)) {
+            std::ofstream metadata(metadata_path);
+            if (metadata) {
+                metadata << fmt::format(
+                    "{{{{\n  \"schema\": \"lichii-native-ampere-v1\",\n"
+                    "  \"program_key\": \"{:016x}\",\n"
+                    "  \"title_id\": \"{:016x}\",\n"
+                    "  \"stage\": \"{}\",\n"
+                    "  \"program_base\": \"0x{:x}\",\n"
+                    "  \"native_code_address\": \"0x{:x}\",\n"
+                    "  \"header_size\": {},\n"
+                    "  \"instruction_count\": {},\n"
+                    "  \"native_size\": {}\n"
+                    "}}}}\n",
+                    Shader::Ampere::NativeProgramKey(native),
+                    Settings::GetCurrentProgramID(), StageToPrefix(stage),
+                    program_base, program_base + native_header_size,
+                    native_header_size, native.size(),
+                    native.size() * sizeof(Shader::Ampere::Instruction));
+            }
+        }
+        if (native_header_size != 0) {
+            auto header_path = path;
+            header_path.replace_extension(".header.bin");
+            if (!std::filesystem::exists(header_path) &&
+                gpu_memory->IsFullyMappedRange(program_base, native_header_size)) {
+                std::vector<u8> header(native_header_size);
+                gpu_memory->ReadBlock(program_base, header.data(), header.size());
+                std::ofstream dump(header_path, std::ios::binary);
+                dump.write(reinterpret_cast<const char*>(header.data()), header.size());
+                dump.close();
+                if (dump) {
+                    LOG_INFO(Shader, "Captured native shader header at {:#x}: {} bytes, path={}",
+                             program_base, header.size(), header_path.string());
+                } else {
+                    LOG_ERROR(Shader, "Cannot write native shader header {}", header_path.string());
+                }
+            }
+        }
+    }
     const std::vector<u32> verified_traps = NativeTrapOffsets(native);
     const size_t trap_count = verified_traps.empty() ? 0 : verified_traps.back() / sizeof(Instruction) + 1;
     if (trap_count && (stage != Shader::Stage::Compute ||
@@ -704,38 +764,6 @@ std::shared_ptr<const LoweredNativeCode> GenericEnvironment::LowerNativeCode(
         !reject_list.empty() &&
         reject_list.find(fmt::format(",{:x},", program_base)) != std::string::npos) {
         throw Shader::RuntimeError("Native shader at {:#x} rejected by EDEN_NX2_REJECT", program_base);
-    }
-    // EDEN_NX2_SHADER_DUMP=<dir>: keep every captured native program (named by its key) so the
-    // lowering can be tested offline against all of a game's shaders.
-    if (static const char* const dump_directory = std::getenv("EDEN_NX2_SHADER_DUMP");
-        dump_directory != nullptr) {
-        const auto folder = std::filesystem::path{dump_directory};
-        const auto path = folder / fmt::format("{:016x}-{}-{:x}.bin", Shader::Ampere::NativeProgramKey(native),
-                                               source_header_size == 0 ? "cs" : "gfx", program_base);
-        if (!std::filesystem::exists(path)) {
-            std::filesystem::create_directories(folder);
-            std::ofstream dump(path, std::ios::binary);
-            dump.write(reinterpret_cast<const char*>(native.data()),
-                       native.size() * sizeof(Shader::Ampere::Instruction));
-        }
-        if (native_header_size != 0) {
-            auto header_path = path;
-            header_path.replace_extension(".header.bin");
-            if (!std::filesystem::exists(header_path) &&
-                gpu_memory->IsFullyMappedRange(program_base, native_header_size)) {
-                std::vector<u8> header(native_header_size);
-                gpu_memory->ReadBlock(program_base, header.data(), header.size());
-                std::ofstream dump(header_path, std::ios::binary);
-                dump.write(reinterpret_cast<const char*>(header.data()), header.size());
-                dump.close();
-                if (dump) {
-                    LOG_INFO(Shader, "Captured native shader header at {:#x}: {} bytes, path={}",
-                             program_base, header.size(), header_path.string());
-                } else {
-                    LOG_ERROR(Shader, "Cannot write native shader header {}", header_path.string());
-                }
-            }
-        }
     }
     if (!found.code && !lowered) {
         if (const char* directory = std::getenv("EDEN_NATIVE_SHADER_OVERRIDE_DIR")) {
