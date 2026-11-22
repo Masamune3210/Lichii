@@ -83,18 +83,47 @@ std::vector<u8> ReadProgramBytes(Tegra::MemoryManager& gpu_memory, GPUVAddr addr
     return bytes;
 }
 
-// Capture at the live shader binding, not just on a cold native lowering. PTC, host shader
-// caches and repeated pipelines otherwise skip the raw-capture path entirely. Only active
-// Ampere programs are eligible; a low per-program variant cap bounds changing CB1 data.
+// Capture at the live shader binding, not just on native lowering. Warm shader caches
+// otherwise skip the raw-capture path entirely. Throttle repeated observations before
+// taking a mutex, touching the filesystem or reading guest memory.
 void CaptureNativeShaderContext(Tegra::MemoryManager& memory, const ShaderInfo* shader,
                                 GPUVAddr address, std::string_view stage, bool graphics,
                                 bool cb1_enabled, GPUVAddr cb1_address, u32 cb1_size,
                                 std::array<u32, 3> mesh_registers = {},
-                                std::span<const u8> primitive_header = {}) {
+                                GPUVAddr primitive_address = 0) {
     const char* const dump_directory = std::getenv("EDEN_NX2_SHADER_CONTEXT_DUMP");
     if (!dump_directory || !*dump_directory || !shader || !shader->lowered_native) return;
 
     const auto& native = *shader->lowered_native;
+    // One immediate snapshot per program/title/stage, then sample once every 2048
+    // bindings to catch changing CB1 tables. Graphics stage binds and compute
+    // dispatches can occur thousands of times a second. Thread-local state avoids
+    // serializing and touching guest memory on the other 2047 visits.
+    struct CaptureKey {
+        u64 title;
+        u64 program_key;
+        GPUVAddr address;
+        std::string_view stage;
+        bool operator==(const CaptureKey&) const = default;
+    };
+    struct CaptureKeyHash {
+        size_t operator()(const CaptureKey& key) const {
+            size_t hash = std::hash<u64>{}(key.title);
+            const auto combine = [&](size_t next) {
+                hash ^= next + size_t{0x9e3779b9} + (hash << 6) + (hash >> 2);
+            };
+            combine(std::hash<u64>{}(key.program_key));
+            combine(std::hash<GPUVAddr>{}(key.address));
+            combine(std::hash<std::string_view>{}(key.stage));
+            return hash;
+        }
+    };
+    static thread_local std::unordered_map<CaptureKey, u32, CaptureKeyHash> observations;
+    const u64 title = Settings::GetCurrentProgramID();
+    const CaptureKey capture_key{title, native.native_program_key, address, stage};
+    const u32 visit = ++observations[capture_key];
+    if (visit != 1 && (visit % 2048) != 0) return;
+
     constexpr size_t header_size = 128;
     const size_t header_bytes = graphics ? header_size : 0;
     if (native.source_size <= header_bytes || native.source_size > (1 << 20) + header_size ||
@@ -108,7 +137,6 @@ void CaptureNativeShaderContext(Tegra::MemoryManager& memory, const ShaderInfo* 
         return;
     }
 
-    const u64 title = Settings::GetCurrentProgramID();
     const auto stem = fmt::format("{:016x}-{}-{:x}", native.native_program_key,
                                   graphics ? "gfx" : "cs", address);
     const auto code_path = folder / (stem + ".bin");
@@ -117,6 +145,8 @@ void CaptureNativeShaderContext(Tegra::MemoryManager& memory, const ShaderInfo* 
     static std::mutex capture_mutex;
     static std::unordered_map<std::string, u32> variant_counts;
     std::scoped_lock lock{capture_mutex};
+    const auto context_group = fmt::format("{}-{:016x}-{}", stem, title, stage);
+    if (variant_counts[context_group] >= 8) return;
 
     if (!std::filesystem::exists(code_path) &&
         memory.IsFullyMappedRange(address, native.source_size)) {
@@ -160,7 +190,6 @@ void CaptureNativeShaderContext(Tegra::MemoryManager& memory, const ShaderInfo* 
     }
     const u64 cb1_hash = cb1.empty() ? 0 :
         Common::CityHash64(reinterpret_cast<const char*>(cb1.data()), cb1.size());
-    const auto context_group = fmt::format("{}-{:016x}-{}", stem, title, stage);
     const auto variant = fmt::format("{}-{:016x}", context_group, cb1_hash);
     const auto context_path = folder / (variant + ".context.json");
     if (std::filesystem::exists(context_path) || variant_counts[context_group] >= 8) return;
@@ -178,7 +207,11 @@ void CaptureNativeShaderContext(Tegra::MemoryManager& memory, const ShaderInfo* 
     const char* cb1_status = !cb1_enabled ? "unbound" : bytes == 0 ? "empty" :
                              mapped ? "captured" : "unmapped";
     const auto primitive_filename = variant + ".primitive-header.bin";
-    if (!primitive_header.empty()) {
+    std::array<u8, 80> primitive_header{};
+    const bool has_primitive_header = primitive_address != 0 &&
+        memory.IsFullyMappedRange(primitive_address, primitive_header.size());
+    if (has_primitive_header) {
+        memory.ReadBlock(primitive_address, primitive_header.data(), primitive_header.size());
         std::ofstream out{folder / primitive_filename, std::ios::binary};
         out.write(reinterpret_cast<const char*>(primitive_header.data()), primitive_header.size());
     }
@@ -202,7 +235,7 @@ void CaptureNativeShaderContext(Tegra::MemoryManager& memory, const ShaderInfo* 
         stem, title, stage, native.native_program_key, address, cb1_status,
         cb1_address, cb1_size, cb1.size(), mapped ? cb1_filename : "",
         mesh_registers[0], mesh_registers[1], mesh_registers[2],
-        primitive_header.empty() ? "" : primitive_filename);
+        has_primitive_header ? primitive_filename : "");
 }
 
 } // Anonymous namespace
@@ -433,8 +466,7 @@ bool ShaderCache::RefreshStages(std::array<u64, 6>& unique_hashes) try {
                 program == Tegra::Engines::Maxwell3D::Regs::ShaderType::Tessellation ? "te" :
                 program == Tegra::Engines::Maxwell3D::Regs::ShaderType::Geometry ? "gs" : "fs";
             std::array<u32, 3> mesh_regs{};
-            std::array<u8, 80> primitive_header{};
-            std::span<const u8> primitive{};
+            GPUVAddr primitive_address = 0;
             if (task || mesh_stage) {
                 const auto& regs = maxwell3d->regs;
                 mesh_regs = {regs.reg_array[Tegra::Engines::Maxwell3D::Regs::MeshShaderA],
@@ -444,16 +476,13 @@ bool ShaderCache::RefreshStages(std::array<u64, 6>& unique_hashes) try {
                         Tegra::Engines::Maxwell3D::Regs::ShaderType::Geometry)) {
                     const auto& geom = regs.pipelines[static_cast<size_t>(
                         Tegra::Engines::Maxwell3D::Regs::ShaderType::Geometry)];
-                    const GPUVAddr primitive_address =
+                    primitive_address =
                         (static_cast<u64>(geom.reserved[0] & 0xff) << 32) | geom.reserved[1];
-                    if (gpu_memory->IsFullyMappedRange(primitive_address, primitive_header.size())) {
-                        gpu_memory->ReadBlock(primitive_address, primitive_header.data(), primitive_header.size());
-                        primitive = primitive_header;
-                    }
                 }
             }
             CaptureNativeShaderContext(*gpu_memory, shader_info, shader_addr, stage, true,
-                                       cb1.enabled, cb1.address, cb1.size, mesh_regs, primitive);
+                                       cb1.enabled, cb1.address, cb1.size, mesh_regs,
+                                       primitive_address);
         }
         shader_infos[index] = shader_info;
         unique_hashes[index] = shader_info->unique_hash;
