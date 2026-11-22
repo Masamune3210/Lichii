@@ -15,9 +15,9 @@ if errorlevel 1 goto SetupFailed
 
 where pwsh.exe >nul 2>&1
 if not errorlevel 1 (
-    pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0Build-Eden-MSVC.ps1" %*
+    pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0Build-Lichii-MSVC.ps1" %*
 ) else (
-    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0Build-Eden-MSVC.ps1" %*
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0Build-Lichii-MSVC.ps1" %*
 )
 set "RESULT=%ERRORLEVEL%"
 goto Finish
