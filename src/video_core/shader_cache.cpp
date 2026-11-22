@@ -534,7 +534,6 @@ const ShaderInfo* ShaderCache::ComputeShader() {
     }
     if (kepler_compute->IsNativeMode() && shader->lowered_native &&
         std::getenv("EDEN_NX2_SHADER_CONTEXT_DUMP")) {
-        const auto& qmd = kepler_compute->launch_description;
         if (qmd.const_buffer_config.size() > 1) {
             const auto& cb1 = qmd.const_buffer_config[1];
             CaptureNativeShaderContext(*gpu_memory, shader, shader_addr, "cs", false,
