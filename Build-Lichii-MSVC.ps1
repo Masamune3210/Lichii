@@ -43,7 +43,7 @@ if (-not $BuildDir) {
 
 $compiler = Get-Command cl.exe -ErrorAction SilentlyContinue
 if (-not $compiler -or $env:VSCMD_ARG_TGT_ARCH -ne "x64") {
-    throw "The x64 MSVC developer environment is required. Run Build-Eden.cmd."
+    throw "The x64 MSVC developer environment is required. Run Build-Lichii.cmd."
 }
 $cmake = Find-BuildTool "cmake.exe" "Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
 $ninja = Find-BuildTool "ninja.exe" "Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja\ninja.exe"
@@ -60,7 +60,7 @@ if ([version]$Matches[1] -lt [version]"3.31.0") {
     throw "CMake 3.31 or later is required; found $versionLine."
 }
 
-Section "Eden x64 MSVC build with native PDB symbols"
+Section "Lichii x64 MSVC build with native PDB symbols"
 Write-Host "Source:   $root"
 Write-Host "Build:    $build"
 Write-Host "Compiler: $($compiler.Source)"
@@ -72,7 +72,7 @@ Write-Host "Jobs:     $Jobs"
 # Preserve a GCC-populated cache and restore a pre-GCC MSVC cache if present.
 $cacheParent = Join-Path $root ".cache"
 $cache = Join-Path $cacheParent "cpm"
-$gccMarker = Join-Path $cache ".eden-ucrt64-gcc-cache"
+$gccMarker = Join-Path $cache ".lichii-ucrt64-gcc-cache"
 New-Item -ItemType Directory -Force -Path $cacheParent | Out-Null
 
 if (Test-Path -LiteralPath $gccMarker -PathType Leaf) {
@@ -92,7 +92,7 @@ if (Test-Path -LiteralPath $gccMarker -PathType Leaf) {
 }
 
 New-Item -ItemType Directory -Force -Path $cache | Out-Null
-New-Item -ItemType File -Force -Path (Join-Path $cache ".eden-msvc-cache") | Out-Null
+New-Item -ItemType File -Force -Path (Join-Path $cache ".lichii-msvc-cache") | Out-Null
 
 # Never delete user build artifacts when changing generators.
 $cacheFile = Join-Path $build "CMakeCache.txt"
@@ -109,7 +109,7 @@ if (Test-Path -LiteralPath $cacheFile -PathType Leaf) {
 }
 
 # /Z7 embeds compiler debug information in .obj files, avoiding shared
-# compiler-PDB contention (C1041). /DEBUG:FULL creates a native eden.pdb.
+# compiler-PDB contention (C1041). /DEBUG:FULL creates a native lichii.pdb.
 # RelWithDebInfo retains optimized Release-style code generation.
 $configure = @(
     "-S", $root,
@@ -149,7 +149,7 @@ $configure = @(
 
 # Configure once for a new build directory, or when this script's CMake options
 # change. Ninja automatically reruns CMake when tracked CMake files change.
-$configureStamp = Join-Path $build ".eden-msvc-configure-args.txt"
+$configureStamp = Join-Path $build ".lichii-msvc-configure-args.txt"
 $configureSignature = (@($cmake, $versionLine) + $configure) -join "`n"
 $needsConfigure = -not (Test-Path -LiteralPath $cacheFile -PathType Leaf) -or
                   -not (Test-Path -LiteralPath (Join-Path $build "build.ninja") -PathType Leaf) -or
@@ -166,7 +166,7 @@ if ($needsConfigure) {
     Write-Host "CMake configuration unchanged; Ninja will regenerate it if needed."
 }
 
-Section "Building Eden"
+Section "Building Lichii"
 Run $cmake @("--build", $build, "--parallel", "$Jobs")
 
 $exe = Join-Path $build "bin\lichii.exe"
