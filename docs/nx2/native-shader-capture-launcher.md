@@ -58,3 +58,7 @@ The UI options `dump_guest_shaders` and `gpu_log_shader_dumps` are not environme
 **Scope:** This is a *runtime shader capture*. It collects shaders observed while running games. It does **not** extract unused static RomFS shader sidecars. For those, retain the original game sidecars or use the existing Lichii source-based extractor. Original instructions and stage metadata captured here are suited to the `titillatingseahorses` native Ampere corpus preflight; generated SPIR-V, frame and GPU traces provide complementary evidence.
 
 On forced termination, the original dump files remain in the run folder even if the final ZIP and manifest could not be created. All environment variables changed by the script are restored to their previous values afterward.
+
+## Zero- or single-title sessions
+
+The final title-ID summary explicitly retains an array after `Sort-Object -Unique`, including when no shader metadata exists. This fixes a `Set-StrictMode -Version Latest` error where the post-exit `Count` property was missing. Earlier launcher versions wrote `capture-manifest.json` and the ZIP before reaching the final title-ID summary, so a completed capture from the earlier build ordinarily does **not** need to be repeated. If the launcher displayed `Capture ZIP:`, use that archive directly.

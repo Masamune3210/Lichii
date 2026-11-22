@@ -137,7 +137,11 @@ finally {
                     Write-Warning "Skipping malformed shader metadata: $($file.Name)"
                 }
             }
-        ) | Sort-Object -Unique
+        )
+        # Sort-Object emits no output for zero title IDs and a scalar for
+        # exactly one. Force the result back into an array under StrictMode
+        # so .Count and -join work for zero, one, or multiple titles.
+        $titleIds = @($titleIds | Sort-Object -Unique)
         $revision = $null
         if (Get-Command git -ErrorAction SilentlyContinue) {
             $rawRevision = @(& git -C $PSScriptRoot rev-parse --verify HEAD 2>$null)
