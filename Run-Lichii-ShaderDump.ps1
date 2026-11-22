@@ -12,6 +12,7 @@ param(
     [string]$Label = 'Lichii',
     [string]$GamePath,
     [switch]$SampledFrame,
+    [switch]$FullDiagnostics,
     [ValidateRange(1, 100000)][int]$GpuTracePresents = 180,
     [switch]$NoZip
 )
@@ -80,17 +81,19 @@ foreach ($folder in @($runPath, $shaderDir, $meshDir, $frameDir, $gpuTraceDir)) 
 # These paths are verified against Masamune3210/Lichii's nx2 source. Capture
 # native shader bytes even if lowering fails; mesh SPIR-V and pipeline builds
 # are complementary diagnostics, not replacements for original instructions.
-# Frame/GPU recording is *armed*, but only begins on the trigger files.
+# Shader and CB1 snapshots are the default. Other diagnostics remain opt-in
+# because synchronous pipeline trace writes and mesh SPIR-V dumps add I/O.
+# Null values explicitly unset inherited instrumentation for this child process.
 $vars = [ordered]@{
     EDEN_NX2_SHADER_DUMP          = $shaderDir
     EDEN_NX2_SHADER_CONTEXT_DUMP  = $shaderDir
-    EDEN_NX2_MESH_EMULATION_DUMP  = $meshDir
-    EDEN_NX2_PIPELINE_BUILD_TRACE = (Join-Path $runPath 'pipeline-builds.txt')
-    EDEN_NX2_FRAME_DUMP           = $frameDir
-    EDEN_NX2_FRAME_DUMP_AT        = 'file'
-    EDEN_NX2_FRAME_DUMP_SAMPLED   = $(if ($SampledFrame) { '1' } else { '0' })
-    EDEN_NX2_GPU_TRACE            = $gpuTraceDir
-    EDEN_NX2_GPU_TRACE_PRESENTS   = "$GpuTracePresents"
+    EDEN_NX2_MESH_EMULATION_DUMP  = $(if ($FullDiagnostics) { $meshDir } else { $null })
+    EDEN_NX2_PIPELINE_BUILD_TRACE = $(if ($FullDiagnostics) { (Join-Path $runPath 'pipeline-builds.txt') } else { $null })
+    EDEN_NX2_FRAME_DUMP           = $(if ($FullDiagnostics) { $frameDir } else { $null })
+    EDEN_NX2_FRAME_DUMP_AT        = $(if ($FullDiagnostics) { 'file' } else { $null })
+    EDEN_NX2_FRAME_DUMP_SAMPLED   = $(if ($FullDiagnostics -and $SampledFrame) { '1' } else { $null })
+    EDEN_NX2_GPU_TRACE            = $(if ($FullDiagnostics) { $gpuTraceDir } else { $null })
+    EDEN_NX2_GPU_TRACE_PRESENTS   = $(if ($FullDiagnostics) { "$GpuTracePresents" } else { $null })
 }
 $previous = @{}
 foreach ($name in $vars.Keys) {
@@ -106,12 +109,16 @@ try {
     Write-Host "Run folder:   $runPath"
     Write-Host "Native code:  $shaderDir"
     Write-Host "Runtime CB1:  $shaderDir (*.context.json and *.cb1.bin)"
-    Write-Host "Mesh SPIR-V:  $meshDir"
-    Write-Host "Build trace:  $($vars.EDEN_NX2_PIPELINE_BUILD_TRACE)"
-    Write-Host 'Frame capture armed; trigger from a second PowerShell terminal:'
-    Write-Host "  New-Item -ItemType File -Force -Path '$frameDir\capture.now'"
-    Write-Host 'GPU trace armed; trigger from a second PowerShell terminal:'
-    Write-Host "  New-Item -ItemType File -Force -Path '$gpuTraceDir\record.now'"
+    if ($FullDiagnostics) {
+        Write-Host "Mesh SPIR-V:  $meshDir"
+        Write-Host "Build trace:  $($vars.EDEN_NX2_PIPELINE_BUILD_TRACE)"
+        Write-Host 'Frame capture armed; trigger from a second PowerShell terminal:'
+        Write-Host "  New-Item -ItemType File -Force -Path '$frameDir\capture.now'"
+        Write-Host 'GPU trace armed; trigger from a second PowerShell terminal:'
+        Write-Host "  New-Item -ItemType File -Force -Path '$gpuTraceDir\record.now'"
+    } else {
+        Write-Host 'Extra diagnostics: off (enable with -FullDiagnostics)'
+    }
     Write-Host 'Run any games in the Lichii GUI. Each shader JSON includes its title ID.'
     Write-Host 'Close Lichii normally to write a manifest and ZIP of the captured files.'
     Write-Host ''
