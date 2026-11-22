@@ -7,12 +7,19 @@
 #include <cstring>
 #include <cstdlib>
 #include <exception>
+#include <filesystem>
+#include <fstream>
 #include <functional>
+#include <limits>
+#include <mutex>
 #include <string>
+#include <string_view>
 #include <unordered_set>
+#include <unordered_map>
 #include <fmt/ranges.h>
 #include <array>
 #include <vector>
+#include <fmt/format.h>
 #include <boost/container/small_vector.hpp>
 
 #include "common/assert.h"
@@ -74,6 +81,123 @@ std::vector<u8> ReadProgramBytes(Tegra::MemoryManager& gpu_memory, GPUVAddr addr
     std::vector<u8> bytes(size);
     gpu_memory.ReadBlockUnsafe(address, bytes.data(), bytes.size());
     return bytes;
+}
+
+// Capture at the live shader binding, not just on a cold native lowering. PTC, host shader
+// caches and repeated pipelines otherwise skip the raw-capture path entirely. Only active
+// Ampere programs are eligible; a low per-program variant cap bounds changing CB1 data.
+void CaptureNativeShaderContext(Tegra::MemoryManager& memory, const ShaderInfo* shader,
+                                GPUVAddr address, std::string_view stage, bool graphics,
+                                bool cb1_enabled, GPUVAddr cb1_address, u32 cb1_size,
+                                std::array<u32, 3> mesh_registers = {},
+                                std::span<const u8> primitive_header = {}) {
+    const char* const dump_directory = std::getenv("EDEN_NX2_SHADER_CONTEXT_DUMP");
+    if (!dump_directory || !*dump_directory || !shader || !shader->lowered_native) return;
+
+    const auto& native = *shader->lowered_native;
+    constexpr size_t header_size = 128;
+    const size_t header_bytes = graphics ? header_size : 0;
+    if (native.source_size <= header_bytes || native.source_size > (1 << 20) + header_size ||
+        (native.source_size - header_bytes) % 16 != 0) return;
+
+    const auto folder = std::filesystem::path{dump_directory};
+    std::error_code error;
+    std::filesystem::create_directories(folder, error);
+    if (error) {
+        LOG_WARNING(Shader, "Cannot create native shader context directory: {}", error.message());
+        return;
+    }
+
+    const u64 title = Settings::GetCurrentProgramID();
+    const auto stem = fmt::format("{:016x}-{}-{:x}", native.native_program_key,
+                                  graphics ? "gfx" : "cs", address);
+    const auto code_path = folder / (stem + ".bin");
+    // All file checks and writes are serialized so another shader worker cannot create
+    // a partially written .bin or metadata file for this same program.
+    static std::mutex capture_mutex;
+    static std::unordered_map<std::string, u32> variant_counts;
+    std::scoped_lock lock{capture_mutex};
+
+    if (!std::filesystem::exists(code_path) &&
+        memory.IsFullyMappedRange(address, native.source_size)) {
+        std::vector<u8> source = ReadProgramBytes(memory, address, native.source_size);
+        {
+            std::ofstream code{code_path, std::ios::binary};
+            code.write(reinterpret_cast<const char*>(source.data() + header_bytes),
+                       source.size() - header_bytes);
+        }
+        if (graphics) {
+            std::ofstream header{folder / (stem + ".header.bin"), std::ios::binary};
+            header.write(reinterpret_cast<const char*>(source.data()), header_size);
+        }
+        std::ofstream metadata{folder / (stem + ".json")};
+        metadata << fmt::format(
+            "{{\n  \"schema\": \"lichii-native-ampere-v1\",\n"
+            "  \"program_key\": \"{:016x}\",\n"
+            "  \"title_id\": \"{:016x}\",\n"
+            "  \"stage\": \"{}\",\n"
+            "  \"program_base\": \"0x{:x}\",\n"
+            "  \"native_code_address\": \"0x{:x}\",\n"
+            "  \"header_size\": {},\n"
+            "  \"instruction_count\": {},\n"
+            "  \"native_size\": {}\n}}\n",
+            native.native_program_key, title, stage, address, address + header_bytes,
+            header_bytes, (native.source_size - header_bytes) / 16,
+            native.source_size - header_bytes);
+    }
+
+    // Only valid, mapped CB1 data is treated as recorded runtime constants. A missing
+    // binding still receives an explicit context record, never a zero-filled false proof.
+    const u32 bytes = (std::min)(cb1_size, u32{0x10000});
+    const bool mapped = cb1_enabled && bytes != 0 &&
+                        cb1_address <= std::numeric_limits<GPUVAddr>::max() - bytes &&
+                        memory.IsFullyMappedRange(cb1_address, bytes);
+    std::vector<u8> cb1;
+    if (mapped) cb1 = ReadProgramBytes(memory, cb1_address, bytes);
+    const u64 cb1_hash = cb1.empty() ? 0 :
+        Common::CityHash64(reinterpret_cast<const char*>(cb1.data()), cb1.size());
+    const auto variant = fmt::format("{}-{:016x}", stem, cb1_hash);
+    const auto context_path = folder / (variant + ".context.json");
+    if (std::filesystem::exists(context_path) || variant_counts[stem] >= 8) return;
+    // Do not count an unbound or unmapped state against the eight valid CB1 variants.
+    if (mapped) ++variant_counts[stem];
+    const auto cb1_filename = variant + ".cb1.bin";
+    if (mapped) {
+        std::ofstream out{folder / cb1_filename, std::ios::binary};
+        out.write(reinterpret_cast<const char*>(cb1.data()), cb1.size());
+        if (!out) {
+            LOG_WARNING(Shader, "Cannot write CB1 runtime capture {}", cb1_filename);
+            return;
+        }
+    }
+    const char* cb1_status = !cb1_enabled ? "unbound" : bytes == 0 ? "empty" :
+                             mapped ? "captured" : "unmapped";
+    const auto primitive_filename = variant + ".primitive-header.bin";
+    if (!primitive_header.empty()) {
+        std::ofstream out{folder / primitive_filename, std::ios::binary};
+        out.write(reinterpret_cast<const char*>(primitive_header.data()), primitive_header.size());
+    }
+    std::ofstream context{context_path};
+    context << fmt::format(
+        "{{\n  \"schema\": \"lichii-native-ampere-runtime-v1\",\n"
+        "  \"source_bin\": \"{}.bin\",\n"
+        "  \"title_id\": \"{:016x}\",\n"
+        "  \"stage\": \"{}\",\n"
+        "  \"program_key\": \"{:016x}\",\n"
+        "  \"program_base\": \"0x{:x}\",\n"
+        "  \"cb1_status\": \"{}\",\n"
+        "  \"cb1_gpu_address\": \"0x{:x}\",\n"
+        "  \"cb1_declared_bytes\": {},\n"
+        "  \"cb1_captured_bytes\": {},\n"
+        "  \"cb1_file\": \"{}\",\n"
+        "  \"mesh_shader_a\": {},\n"
+        "  \"mesh_shader_b\": {},\n"
+        "  \"mesh_init_shader\": {},\n"
+        "  \"primitive_header_file\": \"{}\"\n}}\n",
+        stem, title, stage, native.native_program_key, address, cb1_status,
+        cb1_address, cb1_size, cb1.size(), mapped ? cb1_filename : "",
+        mesh_registers[0], mesh_registers[1], mesh_registers[2],
+        primitive_header.empty() ? "" : primitive_filename);
 }
 
 } // Anonymous namespace
@@ -285,6 +409,47 @@ bool ShaderCache::RefreshStages(std::array<u64, 6>& unique_hashes) try {
                 throw;
             }
         }
+        if (native && shader_info->lowered_native &&
+            std::getenv("EDEN_NX2_SHADER_CONTEXT_DUMP")) {
+            const size_t binding_stage = program == Tegra::Engines::Maxwell3D::Regs::ShaderType::Pixel ? 4 :
+                                         program == Tegra::Engines::Maxwell3D::Regs::ShaderType::Geometry ? 3 :
+                                         program == Tegra::Engines::Maxwell3D::Regs::ShaderType::Tessellation ? 2 :
+                                         program == Tegra::Engines::Maxwell3D::Regs::ShaderType::TessellationInit ? 1 : 0;
+            const auto& cb1 = maxwell3d->state.shader_stages[binding_stage].const_buffers[1];
+            const bool task = mesh && program == Tegra::Engines::Maxwell3D::Regs::ShaderType::VertexB &&
+                              maxwell3d->regs.IsShaderConfigEnabled(
+                                  Tegra::Engines::Maxwell3D::Regs::ShaderType::Tessellation);
+            const bool mesh_stage = mesh &&
+                (program == Tegra::Engines::Maxwell3D::Regs::ShaderType::VertexB ||
+                 program == Tegra::Engines::Maxwell3D::Regs::ShaderType::Tessellation) && !task;
+            const std::string_view stage = task ? "ts" : mesh_stage ? "ms" :
+                program == Tegra::Engines::Maxwell3D::Regs::ShaderType::VertexB ? "vs" :
+                program == Tegra::Engines::Maxwell3D::Regs::ShaderType::TessellationInit ? "tc" :
+                program == Tegra::Engines::Maxwell3D::Regs::ShaderType::Tessellation ? "te" :
+                program == Tegra::Engines::Maxwell3D::Regs::ShaderType::Geometry ? "gs" : "fs";
+            std::array<u32, 3> mesh_regs{};
+            std::array<u8, 80> primitive_header{};
+            std::span<const u8> primitive{};
+            if (task || mesh_stage) {
+                const auto& regs = maxwell3d->regs;
+                mesh_regs = {regs.reg_array[Tegra::Engines::Maxwell3D::Regs::MeshShaderA],
+                             regs.reg_array[Tegra::Engines::Maxwell3D::Regs::MeshShaderB],
+                             regs.reg_array[Tegra::Engines::Maxwell3D::Regs::MeshInitShader]};
+                if (mesh_stage && regs.IsShaderConfigEnabled(
+                        Tegra::Engines::Maxwell3D::Regs::ShaderType::Geometry)) {
+                    const auto& geom = regs.pipelines[static_cast<size_t>(
+                        Tegra::Engines::Maxwell3D::Regs::ShaderType::Geometry)];
+                    const GPUVAddr primitive_address =
+                        (static_cast<u64>(geom.reserved[0] & 0xff) << 32) | geom.reserved[1];
+                    if (gpu_memory->IsFullyMappedRange(primitive_address, primitive_header.size())) {
+                        gpu_memory->ReadBlock(primitive_address, primitive_header.data(), primitive_header.size());
+                        primitive = primitive_header;
+                    }
+                }
+            }
+            CaptureNativeShaderContext(*gpu_memory, shader_info, shader_addr, stage, true,
+                                       cb1.enabled, cb1.address, cb1.size, mesh_regs, primitive);
+        }
         shader_infos[index] = shader_info;
         unique_hashes[index] = shader_info->unique_hash;
         if (mesh && (program == Tegra::Engines::Maxwell3D::Regs::ShaderType::VertexB ||
@@ -360,6 +525,16 @@ const ShaderInfo* ShaderCache::ComputeShader() {
         } catch (const Shader::Exception&) {
             RememberRejection(*cpu_shader_addr);
             throw;
+        }
+    }
+    if (kepler_compute->IsNativeMode() && shader->lowered_native &&
+        std::getenv("EDEN_NX2_SHADER_CONTEXT_DUMP")) {
+        const auto& qmd = kepler_compute->launch_description;
+        if (qmd.const_buffer_config.size() > 1) {
+            const auto& cb1 = qmd.const_buffer_config[1];
+            CaptureNativeShaderContext(*gpu_memory, shader, shader_addr, "cs", false,
+                                       (qmd.const_buffer_enable_mask.Value() & (1u << 1)) != 0,
+                                       cb1.Address(), cb1.size.Value());
         }
     }
     // Check both warm and cold shader paths, before selecting a disk-cached pipeline.
