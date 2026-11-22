@@ -19,6 +19,7 @@ Default output root: `G:\Users\Johnny\Downloads\2\LichiiDumps`. The launcher cre
 | Variable | Launcher value | Behavior |
 | --- | --- | --- |
 | `EDEN_NX2_SHADER_DUMP` | `<run>/shaders` | Original 16-byte native Ampere instruction stream (`.bin`), title/stage/program metadata (`.json`), optional graphics header (`.header.bin`), plus certain rejected stage dumps. Runs before native lowering and shader v2 lookup. |
+| `EDEN_NX2_SHADER_CONTEXT_DUMP` | `<run>/shaders` | New shader-binding capture: re-exports native `.bin` and `.header.bin` on warm shader-cache hits; stores up to eight distinct live CB1 snapshots per native program, plus `.context.json` with title ID, stage, GPU binding status and task/mesh register values. Mesh primitive-header bytes are saved when bound. |
 | `EDEN_NX2_MESH_EMULATION_DUMP` | `<run>/mesh-spv` | Mesh emulation's generated vertex SPIR-V (`.vert.spv`) when applicable. |
 | `EDEN_NX2_PIPELINE_BUILD_TRACE` | `<run>/pipeline-builds.txt` | Begin/end host driver pipeline builds with hashes, timestamps and durations. |
 | `EDEN_NX2_FRAME_DUMP` | `<run>/frames` | Frame dump armed; no capture until the trigger file appears. |
@@ -40,6 +41,20 @@ New-Item -ItemType File -Force -Path 'G:\Users\Johnny\Downloads\2\LichiiDumps\<r
 ```
 
 The launcher prints the actual paths including the unique run directory. Trigger files are consumed by the emulator.
+
+## Runtime context capture and matching
+
+This capture needs the **updated Lichii executable**, not just the launcher. Use `-Build` at least once after pulling the source change. The new instrumentation is guarded by `EDEN_NX2_SHADER_CONTEXT_DUMP`, which the launcher enables only for its child process. It does not clear PTC or shader caches, alter program translation, or require an uncached run.
+
+Each native program still has the original `.bin`, `.header.bin` when graphics, and `.json` metadata. New `*.context.json` records identify the exact source `.bin` and one observed CB1 binding. `cb1_status` is `captured`, `unbound`, `empty`, or `unmapped`. Only `captured` records have matching `*.cb1.bin` binary constants; no missing CB1 is substituted with zero. These bytes are **runtime snapshots**, not proof that an offline BRX uses a given table, and are not automatically valid for a different shader byte sequence.
+
+At exit the launcher writes `runtime-context-index.json`, pairing each context with the **SHA-256 of the original native `.bin`**. This is the appropriate identity for matching a runtime snapshot to a RomFS sidecar or the Ryujinx native preflight. `capture-manifest.json` now counts native programs, context records and CB1 captures separately. The index and captured constants are part of the ZIP.
+
+Task/mesh records also include the three `SET_MESH_*` registers and, where available, the separate 80-byte primitive output header. The normal graphics shader header is always separate. Only executed shaders can have live CB1 data. Static RomFS sidecars that never run cannot acquire valid runtime constant snapshots through an emulator run.
+
+Play through the relevant menu/cutscene/gameplay transition before closing Lichii. The capture runs when a program is actually bound, including warm shader-cache reuse. Capture a new session per game or title-state transition if more than eight CB1 variants are needed for a program. The launcher does not enable frame or GPU recording unless you trigger those separately.
+
+**Check after the run:** the console must show a nonzero `Contexts` count. `Recorded CB1` can legitimately be zero for a title that never binds CB1. A nonzero shader count with zero contexts indicates that the executable probably predates this update.
 
 ## Other shader/GPU diagnostics intentionally **not enabled**
 
