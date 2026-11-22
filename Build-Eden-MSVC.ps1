@@ -147,8 +147,24 @@ $configure = @(
     "-DCMAKE_FIND_USE_INSTALL_PREFIX=FALSE"
 )
 
-Section "Configuring MSVC + Ninja (RelWithDebInfo, /Z7, /DEBUG:FULL)"
-Run $cmake $configure
+# Configure once for a new build directory, or when this script's CMake options
+# change. Ninja automatically reruns CMake when tracked CMake files change.
+$configureStamp = Join-Path $build ".eden-msvc-configure-args.txt"
+$configureSignature = (@($cmake, $versionLine) + $configure) -join "`n"
+$needsConfigure = -not (Test-Path -LiteralPath $cacheFile -PathType Leaf) -or
+                  -not (Test-Path -LiteralPath (Join-Path $build "build.ninja") -PathType Leaf) -or
+                  -not (Test-Path -LiteralPath $configureStamp -PathType Leaf)
+if (-not $needsConfigure) {
+    $needsConfigure = (Get-Content -LiteralPath $configureStamp -Raw) -ne $configureSignature
+}
+
+if ($needsConfigure) {
+    Section "Configuring MSVC + Ninja (RelWithDebInfo, /Z7, /DEBUG:FULL)"
+    Run $cmake $configure
+    Set-Content -LiteralPath $configureStamp -Value $configureSignature -Encoding UTF8 -NoNewline
+} else {
+    Write-Host "CMake configuration unchanged; Ninja will regenerate it if needed."
+}
 
 Section "Building Eden"
 Run $cmake @("--build", $build, "--parallel", "$Jobs")
