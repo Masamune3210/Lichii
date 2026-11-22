@@ -83,6 +83,7 @@ foreach ($folder in @($runPath, $shaderDir, $meshDir, $frameDir, $gpuTraceDir)) 
 # Frame/GPU recording is *armed*, but only begins on the trigger files.
 $vars = [ordered]@{
     EDEN_NX2_SHADER_DUMP          = $shaderDir
+    EDEN_NX2_SHADER_CONTEXT_DUMP  = $shaderDir
     EDEN_NX2_MESH_EMULATION_DUMP  = $meshDir
     EDEN_NX2_PIPELINE_BUILD_TRACE = (Join-Path $runPath 'pipeline-builds.txt')
     EDEN_NX2_FRAME_DUMP           = $frameDir
@@ -104,6 +105,7 @@ try {
     Write-Host "Lichii:       $exe"
     Write-Host "Run folder:   $runPath"
     Write-Host "Native code:  $shaderDir"
+    Write-Host "Runtime CB1:  $shaderDir (*.context.json and *.cb1.bin)"
     Write-Host "Mesh SPIR-V:  $meshDir"
     Write-Host "Build trace:  $($vars.EDEN_NX2_PIPELINE_BUILD_TRACE)"
     Write-Host 'Frame capture armed; trigger from a second PowerShell terminal:'
@@ -126,9 +128,11 @@ try {
 }
 finally {
     try {
-        $metadataFiles = @(Get-ChildItem -LiteralPath $shaderDir -File -Filter '*.json' -ErrorAction SilentlyContinue)
+        $metadataFiles = @(Get-ChildItem -LiteralPath $shaderDir -File -Filter '*.json' -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -notlike '*.context.json' })
+        $contextFiles = @(Get-ChildItem -LiteralPath $shaderDir -File -Filter '*.context.json' -ErrorAction SilentlyContinue)
         $titleIds = @(
-            foreach ($file in $metadataFiles) {
+            foreach ($file in @($metadataFiles) + @($contextFiles)) {
                 try {
                     $capture = Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json
                     if ($capture.title_id) { [string]$capture.title_id }
@@ -138,6 +142,42 @@ finally {
                 }
             }
         )
+        # Pair exact native bytes (SHA-256) with the optional bound CB1 contents.
+        # Unlike Lichii's program_key, this is a portable identity the target
+        # preflight can compare against both runtime dumps and RomFS sidecars.
+        $sha256Cache = @{}
+        $runtimeIndex = @(
+            foreach ($file in $contextFiles) {
+                try {
+                    $capture = Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json
+                    $codePath = Join-Path $shaderDir ([string]$capture.source_bin)
+                    if (-not (Test-Path -LiteralPath $codePath -PathType Leaf)) {
+                        Write-Warning "Runtime context has no matching native program: $($file.Name)"
+                        continue
+                    }
+                    if (-not $sha256Cache.ContainsKey($codePath)) {
+                        $sha256Cache[$codePath] = (Get-FileHash -LiteralPath $codePath -Algorithm SHA256).Hash.ToLowerInvariant()
+                    }
+                    $cb1Path = if ($capture.cb1_file) { Join-Path $shaderDir ([string]$capture.cb1_file) } else { $null }
+                    $cb1Present = [bool]($cb1Path -and (Test-Path -LiteralPath $cb1Path -PathType Leaf))
+                    [ordered]@{
+                        titleId = [string]$capture.title_id
+                        stage = [string]$capture.stage
+                        sourceBin = [string]$capture.source_bin
+                        sourceSha256 = $sha256Cache[$codePath]
+                        contextFile = $file.Name
+                        cb1Status = [string]$capture.cb1_status
+                        cb1File = $(if ($cb1Present) { [string]$capture.cb1_file } else { $null })
+                        cb1Bytes = $(if ($cb1Present) { (Get-Item -LiteralPath $cb1Path).Length } else { 0 })
+                    }
+                }
+                catch {
+                    Write-Warning "Cannot index runtime context $($file.Name): $_"
+                }
+            }
+        )
+        ConvertTo-Json -InputObject @($runtimeIndex) -Depth 5 |
+            Set-Content -LiteralPath (Join-Path $runPath 'runtime-context-index.json') -Encoding utf8
         # Sort-Object emits no output for zero title IDs and a scalar for
         # exactly one. Force the result back into an array under StrictMode
         # so .Count and -join work for zero, one, or multiple titles.
@@ -160,6 +200,8 @@ finally {
             finishedUtc = [datetime]::UtcNow.ToString('o')
             exitCode = $exitCode
             nativeShaderCaptures = $metadataFiles.Count
+            runtimeContextCaptures = $contextFiles.Count
+            recordedCb1Contexts = @($runtimeIndex | Where-Object { $_.cb1Status -eq 'captured' }).Count
             titleIds = @($titleIds)
             environment = $vars
         }
@@ -177,6 +219,11 @@ finally {
 
         Write-Host "Raw captures: $runPath"
         Write-Host "Shaders:      $($metadataFiles.Count) native captures"
+        Write-Host "Contexts:     $($contextFiles.Count) stage-specific runtime captures"
+        Write-Host "Recorded CB1: $(@($runtimeIndex | Where-Object { $_.cb1Status -eq 'captured' }).Count)"
+        if ($metadataFiles.Count -gt 0 -and $contextFiles.Count -eq 0) {
+            Write-Warning 'No runtime contexts captured. Rebuild the updated Lichii source with -Build.'
+        }
         if ($titleIds.Count -gt 0) {
             Write-Host "Title IDs:    $($titleIds -join ', ')"
         }
