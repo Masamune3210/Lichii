@@ -160,11 +160,12 @@ void CaptureNativeShaderContext(Tegra::MemoryManager& memory, const ShaderInfo* 
     }
     const u64 cb1_hash = cb1.empty() ? 0 :
         Common::CityHash64(reinterpret_cast<const char*>(cb1.data()), cb1.size());
-    const auto variant = fmt::format("{}-{:016x}", stem, cb1_hash);
+    const auto context_group = fmt::format("{}-{:016x}-{}", stem, title, stage);
+    const auto variant = fmt::format("{}-{:016x}", context_group, cb1_hash);
     const auto context_path = folder / (variant + ".context.json");
-    if (std::filesystem::exists(context_path) || variant_counts[stem] >= 8) return;
+    if (std::filesystem::exists(context_path) || variant_counts[context_group] >= 8) return;
     // Do not count an unbound or unmapped state against the eight valid CB1 variants.
-    if (mapped) ++variant_counts[stem];
+    if (mapped) ++variant_counts[context_group];
     const auto cb1_filename = variant + ".cb1.bin";
     if (mapped) {
         std::ofstream out{folder / cb1_filename, std::ios::binary};
