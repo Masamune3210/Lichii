@@ -23,10 +23,10 @@ void ToggleConsole() {
     }
 
     using namespace Common::Log;
-#if defined(_WIN32) && !defined(_DEBUG)
+#if defined(_WIN32)
     FILE* temp;
     if (UISettings::values.show_console) {
-        if (AllocConsole()) {
+        if (GetConsoleWindow() || AllocConsole()) {
             // The first parameter for freopen_s is a out parameter, so we can just ignore it
             freopen_s(&temp, "CONIN$", "r", stdin);
             freopen_s(&temp, "CONOUT$", "w", stdout);
