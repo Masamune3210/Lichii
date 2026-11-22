@@ -120,7 +120,8 @@ void CaptureNativeShaderContext(Tegra::MemoryManager& memory, const ShaderInfo* 
 
     if (!std::filesystem::exists(code_path) &&
         memory.IsFullyMappedRange(address, native.source_size)) {
-        std::vector<u8> source = ReadProgramBytes(memory, address, native.source_size);
+        std::vector<u8> source(native.source_size);
+        memory.ReadBlock(address, source.data(), source.size());
         {
             std::ofstream code{code_path, std::ios::binary};
             code.write(reinterpret_cast<const char*>(source.data() + header_bytes),
@@ -153,7 +154,10 @@ void CaptureNativeShaderContext(Tegra::MemoryManager& memory, const ShaderInfo* 
                         cb1_address <= std::numeric_limits<GPUVAddr>::max() - bytes &&
                         memory.IsFullyMappedRange(cb1_address, bytes);
     std::vector<u8> cb1;
-    if (mapped) cb1 = ReadProgramBytes(memory, cb1_address, bytes);
+    if (mapped) {
+        cb1.resize(bytes);
+        memory.ReadBlock(cb1_address, cb1.data(), cb1.size());
+    }
     const u64 cb1_hash = cb1.empty() ? 0 :
         Common::CityHash64(reinterpret_cast<const char*>(cb1.data()), cb1.size());
     const auto variant = fmt::format("{}-{:016x}", stem, cb1_hash);
