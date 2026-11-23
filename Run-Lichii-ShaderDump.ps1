@@ -219,9 +219,75 @@ finally {
             Add-Type -AssemblyName System.IO.Compression
             Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
             $zipPath = "$runPath.zip"
+            # SmallestSize is the highest standard Deflate effort, while
+            # remaining compatible with .NET ZipArchive in the Ryujinx tests.
             [IO.Compression.ZipFile]::CreateFromDirectory(
-                $runPath, $zipPath, [IO.Compression.CompressionLevel]::Optimal, $false)
-            Write-Host "Capture ZIP:  $zipPath"
+                $runPath, $zipPath, [IO.Compression.CompressionLevel]::SmallestSize, $false)
+
+            # GitHub warns at 50 MB per blob. Split only after compression,
+            # and only if the finished ZIP exceeds 45,000,000 bytes. These
+            # are raw consecutive ZIP byte ranges, not PKZIP .z01 volumes.
+            # Their concatenation is an ordinary ZIP with unchanged offsets.
+            $partLimit = 45000000L
+            $archiveBytes = (Get-Item -LiteralPath $zipPath).Length
+            if ($archiveBytes -gt $partLimit) {
+                $parts = [System.Collections.Generic.List[string]]::new()
+                $buffer = [byte[]]::new(1048576)
+                $inputZip = [IO.File]::OpenRead($zipPath)
+                try {
+                    try {
+                        while ($inputZip.Position -lt $inputZip.Length) {
+                            $partNumber = $parts.Count + 1
+                            if ($partNumber -gt 999) {
+                                throw 'More than 999 ZIP parts required; extend the corpus segment naming protocol.'
+                            }
+                            $partPath = '{0}.{1:D3}' -f $zipPath, $partNumber
+                            if (Test-Path -LiteralPath $partPath) {
+                                throw "ZIP segment already exists: $partPath"
+                            }
+
+                            $partStream = [IO.File]::Create($partPath)
+                            $parts.Add($partPath)
+                            try {
+                                $written = 0L
+                                while ($written -lt $partLimit -and
+                                       $inputZip.Position -lt $inputZip.Length) {
+                                    $take = [int][Math]::Min($buffer.Length, $partLimit - $written)
+                                    $read = $inputZip.Read($buffer, 0, $take)
+                                    if ($read -le 0) {
+                                        throw "Unexpected end of compressed capture: $zipPath"
+                                    }
+                                    $partStream.Write($buffer, 0, $read)
+                                    $written += $read
+                                }
+                            }
+                            finally {
+                                $partStream.Dispose()
+                            }
+                        }
+                    }
+                    catch {
+                        foreach ($part in $parts) {
+                            Remove-Item -LiteralPath $part -Force -ErrorAction SilentlyContinue
+                        }
+                        throw
+                    }
+                }
+                finally {
+                    $inputZip.Dispose()
+                }
+
+                # All pieces were written successfully. Keep the complete ZIP
+                # if a split fails; remove it only after every piece is ready.
+                Remove-Item -LiteralPath $zipPath -Force
+                Write-Host "Capture ZIP:  $($parts.Count) parts (45,000,000 bytes maximum each)"
+                foreach ($part in $parts) {
+                    Write-Host "  $part"
+                }
+            }
+            else {
+                Write-Host "Capture ZIP:  $zipPath"
+            }
         }
 
         Write-Host "Raw captures: $runPath"
