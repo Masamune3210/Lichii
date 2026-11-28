@@ -172,3 +172,5 @@ Tests: `python -m unittest discover -s tools/nx2 -p test_merge_shader_captures.p
 Synthetic regression coverage includes idempotence, collisions, context
 variants, split reassembly, explicit imports and prior generation preservation.
 Actual Pokopia captures and launcher execution have not been supplied here.
+
+Cumulative merger validation: all five synthetic Python unittest cases passed locally, using byte-identical copies verified against donor Git blobs 5de18902fef535a147270ffaa0afc7e786f728b2 (merger) and e0fc8a3fcd1f782f903cac29af6aae25eb5910df (tests). Covers repeated sessions, distinct context/header variants, raw split reassembly, persistent explicit imports, label separation and preserving the prior archive on missing or malformed input. Actual Pokopia raw session, Windows PowerShell launcher and target NUnit importer remain unverified. The merger reports capture counts; CB1 blocker recovery itself still needs comparison against the existing report or translation of new archive, and is not automatically inferred from a blob's presence. Keep raw sessions; no cache reset or gameplay replay required to merge existing captures.
