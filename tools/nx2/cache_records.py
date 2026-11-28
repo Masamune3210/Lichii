@@ -25,6 +25,7 @@ shaders: keep them private. Standard library only; record header CRCs are checke
 """
 
 import argparse
+import hashlib
 import json
 import struct
 import sys
@@ -56,7 +57,7 @@ class Damaged(Exception):
     pass
 
 
-def parse_log(data):
+def parse_log(data, kinds=(KIND_GRAPHICS, KIND_COMPUTE)):
     """The live graphics and compute records of a v2 log, as (kind, key, payload) in file order."""
     if data[:8] == FILE_MAGIC and len(data) >= FILE_HEADER_SIZE and \
             struct.unpack_from("<I", data, 24)[0] == zlib.crc32(data[:24]):
@@ -77,7 +78,7 @@ def parse_log(data):
         if kind == KIND_TOMBSTONE:
             if len(payload) >= 2:
                 live.pop((struct.unpack_from("<H", payload)[0], key), None)
-        elif kind in (KIND_GRAPHICS, KIND_COMPUTE):
+        elif kind in kinds:
             live[(kind, key)] = (order, payload)
             order += 1
         offset = (end + RECORD_HASH_SIZE + 7) // 8 * 8
@@ -105,14 +106,14 @@ class Reader:
         return [self.unpack(fmt) for _ in range(count)]
 
 
-def read_environment(reader):
+def read_environment(reader, include_code_hash=False):
     """One environment as GenericEnvironment::Serialize writes it, its code skipped."""
     (code_size, num_texture_types, num_pixel_formats, num_cbuf_values, num_pointer_types,
      num_replacements) = reader.unpack("<6Q")
     _local_memory, texture_bound, _start, _lowest, _highest, _viewport, stage = reader.unpack("<7I")
     if stage not in STAGES:
         raise Damaged(f"invalid stage {stage}")
-    reader.take(code_size)
+    code = reader.take(code_size)
     reader.pairs(num_texture_types, "<II")
     reader.pairs(num_pixel_formats, "<Ii")
     cbuf_values = dict(reader.pairs(num_cbuf_values, "<QI"))
@@ -128,6 +129,7 @@ def read_environment(reader):
             reader.take(12 + SPH_SIZE)
     return {
         "stage": stage,
+        **({"code_sha256": hashlib.sha256(code).hexdigest()} if include_code_hash else {}),
         "texture_bound": texture_bound,
         "read_properties": cbuf_values.pop(READ_PROPERTIES_KEY, None),
         "null_texture_2d": cbuf_values.pop(NULL_TEXTURE_2D_KEY, None) is not None,
@@ -169,12 +171,12 @@ def unbound_slots(environment, compute):
     return slots
 
 
-def read_record(kind, key, payload):
+def read_record(kind, key, payload, include_code_hash=False):
     reader = Reader(payload)
     (count,) = reader.unpack("<I")
     if count == 0 or count > 6:
         raise Damaged(f"{count} environments")
-    environments = [read_environment(reader) for _ in range(count)]
+    environments = [read_environment(reader, include_code_hash) for _ in range(count)]
     compute = kind == KIND_COMPUTE
     key_bytes = payload[reader.offset:]
     if compute:
