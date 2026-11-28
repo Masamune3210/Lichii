@@ -113,3 +113,62 @@ python tools/nx2/recover_cb1_candidates.py "PATH_TO/NativeCorpora(10).zip" "PATH
 ```
 
 Use the existing cache root containing the per-title 16-hex-digit folders and lichii-cache.v2.bin files. A single copied cache outside such a folder requires `--title <16-digit-id>`. The tool never rewrites a cache, never overwrites the output, and outputs only requested CB1 words and provenance, not native shader bodies. No pip dependencies. It groups the report requests, requires title/stage and exact native-body SHA256, and links the native Program to the serialized pipeline environment by both shader hash and exact lowered-code SHA256. It only emits candidates containing every requested word, retains distinct table variants, flags zero/unaligned/out-of-range target values, and excludes missing words rather than synthesizing them. Current reports have 109 title-specific request groups covering 184 instances. Raw 128-byte SPH identity, original runtime CB mapping, and XXH3 payload verification are not established by this parser, so candidate JSON is not accepted as a verified runtime capture. Review candidates and preserve separate provenance before any offline translation validation. Local Python synthetic tests: existing three cache_records tests and two recovery tests passed; actual uploaded corpus report parsed 109 groups/184 entries; actual disk-cache recovery remains untested because no cache files were provided. Keep shader caches private and send only the candidate JSON.
+
+## Cumulative gameplay captures (supersedes separate-session packaging above)
+
+Ordinary launcher invocations now accumulate completed raw sessions with the
+same label into `<DumpRoot>\<Label>-cumulative\<Label>.zip` (or numbered raw
+45,000,000-byte ZIP parts). The raw timestamped run folders remain intact.
+The label is a collection name, not a title filter. Existing completed runs
+with that label are automatically included. Use the same label each time:
+
+```powershell
+.\Run-Lichii-ShaderDump.ps1 -Label Pokopia
+```
+
+To include gameplay already captured without launching or rebuilding:
+
+```powershell
+.\Run-Lichii-ShaderDump.ps1 -MergeOnly -Label Pokopia
+```
+
+If the existing session was captured under another label (e.g. default Lichii),
+explicitly import its existing raw run directory:
+
+```powershell
+.\Run-Lichii-ShaderDump.ps1 -MergeOnly -Label Pokopia -ImportRun 'PATH_TO_EXISTING_RAW_RUN'
+```
+
+Imported paths are retained in the local cumulative state for future runs.
+Imports include every title in the selected session. No old cache or emulator
+build is needed to merge. Standard-library Python is required for packaging.
+`-NoZip` defers packaging, and `-SeparateRun` preserves the old standalone
+ZIP behavior. `-FullDiagnostics` also retains the standalone diagnostic ZIP;
+only native code/headers and runtime contexts enter the cumulative archive.
+
+The merger reads completed session manifests, groups exact source metadata,
+original stem, body and header hashes, then deduplicates complete context
+metadata and exact companion bytes. Different addresses, headers, titles,
+CB1 variants, mesh/primitive state, and missing-data observations are preserved.
+Canonical names contain the original stem plus content hashes, so conflicting
+file names cannot overwrite each other. Rewrites companion references and
+regenerates the root runtime index, manifest and provenance. No fabricated CB1,
+no cross-address borrowing. Incomplete source/header pairs and orphan contexts
+are listed in the manifest; malformed snapshots abort rather than silently
+discard data. Raw rejected binaries and non-shader diagnostics remain in the
+original sessions.
+
+The existing cumulative generation remains intact until a staged ZIP passes
+CRC checks and any split parts rejoin byte-for-byte. A prior identity disappearing
+from the raw input set aborts the merge. Keep the original raw session directories
+(including explicitly imported ones); this version rebuilds from them rather
+than deleting or reading back the old archive. A lock prevents concurrent
+merges. If interrupted during replacement, inspect the .previous directory
+and .lock file before retrying; do not delete the only valid generation.
+A generation may change from unsplit to split or vice versa, so copy only
+the new archive set, not stale parts from an earlier generation.
+
+Tests: `python -m unittest discover -s tools/nx2 -p test_merge_shader_captures.py -v`.
+Synthetic regression coverage includes idempotence, collisions, context
+variants, split reassembly, explicit imports and prior generation preservation.
+Actual Pokopia captures and launcher execution have not been supplied here.

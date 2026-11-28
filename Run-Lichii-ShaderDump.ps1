@@ -14,7 +14,10 @@ param(
     [switch]$SampledFrame,
     [switch]$FullDiagnostics,
     [ValidateRange(1, 100000)][int]$GpuTracePresents = 180,
-    [switch]$NoZip
+    [switch]$NoZip,
+    [switch]$MergeOnly,
+    [switch]$SeparateRun,
+    [string[]]$ImportRun = @()
 )
 
 Set-StrictMode -Version Latest
@@ -25,6 +28,34 @@ function Resolve-SourcePath([string]$Path) {
         return [IO.Path]::GetFullPath($Path)
     }
     return [IO.Path]::GetFullPath((Join-Path $PSScriptRoot $Path))
+}
+
+$dumpRootFull = [IO.Path]::GetFullPath($DumpRoot)
+
+function Update-CumulativeCapture {
+    $merger = Join-Path $PSScriptRoot 'tools/nx2/merge_shader_captures.py'
+    $mergeArgs = @($merger, '--root', $dumpRootFull, '--label', $Label)
+    foreach ($run in $ImportRun) {
+        $mergeArgs += @('--import-run', [IO.Path]::GetFullPath($run))
+    }
+    & python @mergeArgs
+    if ($LASTEXITCODE -ne 0) {
+        throw "Cumulative capture merge failed ($LASTEXITCODE). Existing archives and raw captures were retained."
+    }
+}
+
+if ($MergeOnly) {
+    if ($Build -or $Executable -or $GamePath -or $NoZip -or $SeparateRun -or $FullDiagnostics -or $SampledFrame) {
+        throw '-MergeOnly packages existing completed runs; do not combine it with launch/build or separate-archive switches.'
+    }
+    Update-CumulativeCapture
+    return
+}
+if ($ImportRun.Count -gt 0 -and ($NoZip -or $SeparateRun)) {
+    throw '-ImportRun requires cumulative packaging.'
+}
+if (-not $NoZip -and -not $SeparateRun) {
+    Get-Command python -ErrorAction Stop | Out-Null
 }
 
 $buildPath = Resolve-SourcePath $BuildDir
@@ -66,7 +97,6 @@ if ($GamePath) {
     $launchArgs += (Resolve-Path -LiteralPath $GamePath).ProviderPath
 }
 
-$dumpRootFull = [IO.Path]::GetFullPath($DumpRoot)
 New-Item -ItemType Directory -Path $dumpRootFull -Force | Out-Null
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $runPath = Join-Path $dumpRootFull ("{0}-{1}-{2}" -f $stamp, $Label, [guid]::NewGuid().ToString('N').Substring(0, 8))
@@ -120,7 +150,13 @@ try {
         Write-Host 'Extra diagnostics: off (enable with -FullDiagnostics)'
     }
     Write-Host 'Run any games in the Lichii GUI. Each shader JSON includes its title ID.'
-    Write-Host 'Close Lichii normally to write a manifest and ZIP of the captured files.'
+    if ($NoZip) {
+        Write-Host 'Close Lichii normally to write a manifest; packaging is deferred.'
+    } elseif ($SeparateRun) {
+        Write-Host 'Close Lichii normally to package this separate run.'
+    } else {
+        Write-Host "Close Lichii normally to update the cumulative $Label shader archive."
+    }
     Write-Host ''
 
     # Keep Lichii's expected working directory for its Qt files and settings.
@@ -215,7 +251,9 @@ finally {
         $manifest | ConvertTo-Json -Depth 6 |
             Set-Content -LiteralPath (Join-Path $runPath 'capture-manifest.json') -Encoding utf8
 
-        if (-not $NoZip) {
+        # Full diagnostics remain available in their own per-run package.
+        # Ordinary gameplay needs only the cumulative shader archive.
+        if (-not $NoZip -and ($SeparateRun -or $FullDiagnostics)) {
             Add-Type -AssemblyName System.IO.Compression
             Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
             $zipPath = "$runPath.zip"
@@ -290,6 +328,9 @@ finally {
             }
         }
 
+        if (-not $NoZip -and -not $SeparateRun) {
+            Update-CumulativeCapture
+        }
         Write-Host "Raw captures: $runPath"
         Write-Host "Shaders:      $($metadataFiles.Count) native captures"
         Write-Host "Contexts:     $($contextFiles.Count) stage-specific runtime captures"
