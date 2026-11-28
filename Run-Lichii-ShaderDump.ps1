@@ -208,7 +208,7 @@ finally {
             exitCode = $exitCode
             nativeShaderCaptures = $metadataFiles.Count
             runtimeContextCaptures = $contextFiles.Count
-            recordedCb1Contexts = @($runtimeIndex | Where-Object { $_.cb1Status -eq 'captured' }).Count
+            recordedCb1Contexts = @($runtimeIndex | Where-Object { $_.cb1Status -in @('captured', 'captured-prefix') }).Count
             titleIds = @($titleIds)
             environment = $vars
         }
@@ -293,7 +293,7 @@ finally {
         Write-Host "Raw captures: $runPath"
         Write-Host "Shaders:      $($metadataFiles.Count) native captures"
         Write-Host "Contexts:     $($contextFiles.Count) stage-specific runtime captures"
-        Write-Host "Recorded CB1: $(@($runtimeIndex | Where-Object { $_.cb1Status -eq 'captured' }).Count)"
+        Write-Host "Recorded CB1: $(@($runtimeIndex | Where-Object { $_.cb1Status -in @('captured', 'captured-prefix') }).Count)"
         if ($metadataFiles.Count -gt 0 -and $contextFiles.Count -eq 0) {
             Write-Warning 'No runtime contexts captured. Rebuild the updated Lichii source with -Build.'
         }

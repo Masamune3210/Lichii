@@ -118,11 +118,33 @@ void CaptureNativeShaderContext(Tegra::MemoryManager& memory, const ShaderInfo* 
             return hash;
         }
     };
-    static thread_local std::unordered_map<CaptureKey, u32, CaptureKeyHash> observations;
+    struct Observation {
+        u64 visits{};
+        u64 last_sample{};
+        GPUVAddr cb1_address{};
+        u32 cb1_size{};
+        bool cb1_enabled{};
+        bool complete{};
+    };
+    static thread_local std::unordered_map<CaptureKey, Observation, CaptureKeyHash> observations;
     const u64 title = Settings::GetCurrentProgramID();
     const CaptureKey capture_key{title, native.native_program_key, address, stage};
-    const u32 visit = ++observations[capture_key];
-    if (visit != 1 && (visit % 2048) != 0) return;
+    auto& observation = observations[capture_key];
+    const u64 visit = ++observation.visits;
+    const bool changed = observation.cb1_address != cb1_address ||
+                         observation.cb1_size != cb1_size ||
+                         observation.cb1_enabled != cb1_enabled;
+    // Retry missing/partial captures early, then periodically. Also observe a
+    // changed binding, rate-limited to avoid per-draw guest reads on games
+    // which rotate CB allocations. Compare with the last sampled binding.
+    const bool retry = !observation.complete &&
+        (((visit & (visit - 1)) == 0) ||
+         (changed && visit - observation.last_sample >= 32));
+    if (visit != 1 && (visit % 2048) != 0 && !retry) return;
+    observation.last_sample = visit;
+    observation.cb1_address = cb1_address;
+    observation.cb1_size = cb1_size;
+    observation.cb1_enabled = cb1_enabled;
 
     constexpr size_t header_size = 128;
     const size_t header_bytes = graphics ? header_size : 0;
@@ -144,6 +166,7 @@ void CaptureNativeShaderContext(Tegra::MemoryManager& memory, const ShaderInfo* 
     // a partially written .bin or metadata file for this same program.
     static std::mutex capture_mutex;
     static std::unordered_map<std::string, u32> variant_counts;
+    static std::unordered_map<std::string, u32> prefix_counts;
     std::scoped_lock lock{capture_mutex};
     const auto context_group = fmt::format("{}-{:016x}-{}", stem, title, stage);
     if (variant_counts[context_group] >= 8) return;
@@ -180,21 +203,48 @@ void CaptureNativeShaderContext(Tegra::MemoryManager& memory, const ShaderInfo* 
     // Only valid, mapped CB1 data is treated as recorded runtime constants. A missing
     // binding still receives an explicit context record, never a zero-filled false proof.
     const u32 bytes = (std::min)(cb1_size, u32{0x10000});
-    const bool mapped = cb1_enabled && bytes != 0 &&
-                        cb1_address <= std::numeric_limits<GPUVAddr>::max() - bytes &&
-                        memory.IsFullyMappedRange(cb1_address, bytes);
+    const u32 words = bytes / sizeof(u32);
+    u32 mapped_words = 0;
+    if (cb1_enabled && words != 0 &&
+        cb1_address <= std::numeric_limits<GPUVAddr>::max() - bytes) {
+        // A declared CB can cross into an unmapped page even when all its
+        // jump-table words are accessible. Search for the longest fully
+        // mapped prefix, in whole dwords, without synthesizing missing data.
+        if (memory.IsFullyMappedRange(cb1_address, words * sizeof(u32))) {
+            mapped_words = words;
+        } else if (memory.IsFullyMappedRange(cb1_address, sizeof(u32))) {
+            u32 low = 1;
+            u32 high = words;
+            while (high - low > 1) {
+                const u32 mid = low + (high - low) / 2;
+                if (memory.IsFullyMappedRange(cb1_address, mid * sizeof(u32))) {
+                    low = mid;
+                } else {
+                    high = mid;
+                }
+            }
+            mapped_words = low;
+        }
+    }
+    const bool mapped = mapped_words != 0;
+    const bool complete = mapped && mapped_words * sizeof(u32) == bytes;
     std::vector<u8> cb1;
     if (mapped) {
-        cb1.resize(bytes);
+        cb1.resize(mapped_words * sizeof(u32));
         memory.ReadBlock(cb1_address, cb1.data(), cb1.size());
     }
+    observation.complete |= complete;
     const u64 cb1_hash = cb1.empty() ? 0 :
         Common::CityHash64(reinterpret_cast<const char*>(cb1.data()), cb1.size());
-    const auto variant = fmt::format("{}-{:016x}", context_group, cb1_hash);
+    const auto variant = fmt::format("{}-{:016x}{}", context_group, cb1_hash,
+                                     mapped && !complete ? "-prefix" : "");
     const auto context_path = folder / (variant + ".context.json");
-    if (std::filesystem::exists(context_path) || variant_counts[context_group] >= 8) return;
-    // Do not count an unbound or unmapped state against the eight valid CB1 variants.
-    if (mapped) ++variant_counts[context_group];
+    if (std::filesystem::exists(context_path) || variant_counts[context_group] >= 8 ||
+        (mapped && !complete && prefix_counts[context_group] >= 8)) return;
+    // Reserve separate budgets for incomplete and complete captures so
+    // prefixes cannot prevent a later complete snapshot.
+    if (complete) ++variant_counts[context_group];
+    else if (mapped) ++prefix_counts[context_group];
     const auto cb1_filename = variant + ".cb1.bin";
     if (mapped) {
         std::ofstream out{folder / cb1_filename, std::ios::binary};
@@ -205,7 +255,7 @@ void CaptureNativeShaderContext(Tegra::MemoryManager& memory, const ShaderInfo* 
         }
     }
     const char* cb1_status = !cb1_enabled ? "unbound" : bytes == 0 ? "empty" :
-                             mapped ? "captured" : "unmapped";
+                             complete ? "captured" : mapped ? "captured-prefix" : "unmapped";
     const auto primitive_filename = variant + ".primitive-header.bin";
     std::array<u8, 80> primitive_header{};
     const bool has_primitive_header = primitive_address != 0 &&
@@ -348,15 +398,68 @@ u64 ShaderCache::MeshStateHash() const {
 bool ShaderCache::RefreshStages(std::array<u64, 6>& unique_hashes) try {
     auto& dirty{maxwell3d->dirty.flags};
     const u64 removals{removal_serial.load(std::memory_order_acquire)};
+    const bool native = maxwell3d->GetNativeMacroEngine().native_turing;
+    const bool capture_context = native && std::getenv("EDEN_NX2_SHADER_CONTEXT_DUMP");
+    const bool mesh{native && maxwell3d->regs.IsMeshEnabled()};
+    using ShaderType = Tegra::Engines::Maxwell3D::Regs::ShaderType;
+    const auto capture_stage = [&](ShaderType program, const ShaderInfo* shader_info,
+                                   GPUVAddr shader_addr) {
+        if (shader_info && shader_info->lowered_native) {
+            const size_t binding_stage = program == Tegra::Engines::Maxwell3D::Regs::ShaderType::Pixel ? 4 :
+                                         program == Tegra::Engines::Maxwell3D::Regs::ShaderType::Geometry ? 3 :
+                                         program == Tegra::Engines::Maxwell3D::Regs::ShaderType::Tessellation ? 2 :
+                                         program == Tegra::Engines::Maxwell3D::Regs::ShaderType::TessellationInit ? 1 : 0;
+            const auto& cb1 = maxwell3d->state.shader_stages[binding_stage].const_buffers[1];
+            const bool task = mesh && program == Tegra::Engines::Maxwell3D::Regs::ShaderType::VertexB &&
+                              maxwell3d->regs.IsShaderConfigEnabled(
+                                  Tegra::Engines::Maxwell3D::Regs::ShaderType::Tessellation);
+            const bool mesh_stage = mesh &&
+                (program == Tegra::Engines::Maxwell3D::Regs::ShaderType::VertexB ||
+                 program == Tegra::Engines::Maxwell3D::Regs::ShaderType::Tessellation) && !task;
+            const std::string_view stage = task ? "ts" : mesh_stage ? "ms" :
+                (program == Tegra::Engines::Maxwell3D::Regs::ShaderType::VertexA ||
+                 program == Tegra::Engines::Maxwell3D::Regs::ShaderType::VertexB) ? "vs" :
+                program == Tegra::Engines::Maxwell3D::Regs::ShaderType::TessellationInit ? "tc" :
+                program == Tegra::Engines::Maxwell3D::Regs::ShaderType::Tessellation ? "te" :
+                program == Tegra::Engines::Maxwell3D::Regs::ShaderType::Geometry ? "gs" : "fs";
+            std::array<u32, 3> mesh_regs{};
+            GPUVAddr primitive_address = 0;
+            if (task || mesh_stage) {
+                const auto& regs = maxwell3d->regs;
+                mesh_regs = {regs.reg_array[Tegra::Engines::Maxwell3D::Regs::MeshShaderA],
+                             regs.reg_array[Tegra::Engines::Maxwell3D::Regs::MeshShaderB],
+                             regs.reg_array[Tegra::Engines::Maxwell3D::Regs::MeshInitShader]};
+                if (mesh_stage && regs.IsShaderConfigEnabled(
+                        Tegra::Engines::Maxwell3D::Regs::ShaderType::Geometry)) {
+                    const auto& geom = regs.pipelines[static_cast<size_t>(
+                        Tegra::Engines::Maxwell3D::Regs::ShaderType::Geometry)];
+                    primitive_address =
+                        (static_cast<u64>(geom.reserved[0] & 0xff) << 32) | geom.reserved[1];
+                }
+            }
+            CaptureNativeShaderContext(*gpu_memory, shader_info, shader_addr, stage, true,
+                                       cb1.enabled, cb1.address, cb1.size, mesh_regs,
+                                       primitive_address);
+        }
+    };
     if (!dirty[VideoCommon::Dirty::Shaders] && removals == seen_removal_serial) {
+        // The bound CB can change without invalidating the shader program.
+        // Revisit valid cached stages; the capture function throttles reads.
+        if (capture_context && last_shaders_valid) {
+            for (size_t index = 0; index < unique_hashes.size(); ++index) {
+                if (unique_hashes[index] == 0 || !shader_infos[index]) continue;
+                const auto& config = maxwell3d->regs.pipelines[index];
+                const GPUVAddr address = (static_cast<u64>(config.reserved[0] & 0xff) << 32) |
+                                         config.reserved[1];
+                capture_stage(static_cast<ShaderType>(index), shader_infos[index], address);
+            }
+        }
         return last_shaders_valid;
     }
     seen_removal_serial = removals;
     dirty[VideoCommon::Dirty::Shaders] = false;
 
     const GPUVAddr base_addr{maxwell3d->regs.program_region.Address()};
-    const bool native = maxwell3d->GetNativeMacroEngine().native_turing;
-    const bool mesh{native && maxwell3d->regs.IsMeshEnabled()};
     for (size_t index = 0; index < Tegra::Engines::Maxwell3D::Regs::MaxShaderProgram; ++index) {
         if (!maxwell3d->regs.IsShaderConfigEnabled(index)) {
             unique_hashes[index] = 0;
@@ -447,43 +550,7 @@ bool ShaderCache::RefreshStages(std::array<u64, 6>& unique_hashes) try {
                 throw;
             }
         }
-        if (native && shader_info->lowered_native &&
-            std::getenv("EDEN_NX2_SHADER_CONTEXT_DUMP")) {
-            const size_t binding_stage = program == Tegra::Engines::Maxwell3D::Regs::ShaderType::Pixel ? 4 :
-                                         program == Tegra::Engines::Maxwell3D::Regs::ShaderType::Geometry ? 3 :
-                                         program == Tegra::Engines::Maxwell3D::Regs::ShaderType::Tessellation ? 2 :
-                                         program == Tegra::Engines::Maxwell3D::Regs::ShaderType::TessellationInit ? 1 : 0;
-            const auto& cb1 = maxwell3d->state.shader_stages[binding_stage].const_buffers[1];
-            const bool task = mesh && program == Tegra::Engines::Maxwell3D::Regs::ShaderType::VertexB &&
-                              maxwell3d->regs.IsShaderConfigEnabled(
-                                  Tegra::Engines::Maxwell3D::Regs::ShaderType::Tessellation);
-            const bool mesh_stage = mesh &&
-                (program == Tegra::Engines::Maxwell3D::Regs::ShaderType::VertexB ||
-                 program == Tegra::Engines::Maxwell3D::Regs::ShaderType::Tessellation) && !task;
-            const std::string_view stage = task ? "ts" : mesh_stage ? "ms" :
-                program == Tegra::Engines::Maxwell3D::Regs::ShaderType::VertexB ? "vs" :
-                program == Tegra::Engines::Maxwell3D::Regs::ShaderType::TessellationInit ? "tc" :
-                program == Tegra::Engines::Maxwell3D::Regs::ShaderType::Tessellation ? "te" :
-                program == Tegra::Engines::Maxwell3D::Regs::ShaderType::Geometry ? "gs" : "fs";
-            std::array<u32, 3> mesh_regs{};
-            GPUVAddr primitive_address = 0;
-            if (task || mesh_stage) {
-                const auto& regs = maxwell3d->regs;
-                mesh_regs = {regs.reg_array[Tegra::Engines::Maxwell3D::Regs::MeshShaderA],
-                             regs.reg_array[Tegra::Engines::Maxwell3D::Regs::MeshShaderB],
-                             regs.reg_array[Tegra::Engines::Maxwell3D::Regs::MeshInitShader]};
-                if (mesh_stage && regs.IsShaderConfigEnabled(
-                        Tegra::Engines::Maxwell3D::Regs::ShaderType::Geometry)) {
-                    const auto& geom = regs.pipelines[static_cast<size_t>(
-                        Tegra::Engines::Maxwell3D::Regs::ShaderType::Geometry)];
-                    primitive_address =
-                        (static_cast<u64>(geom.reserved[0] & 0xff) << 32) | geom.reserved[1];
-                }
-            }
-            CaptureNativeShaderContext(*gpu_memory, shader_info, shader_addr, stage, true,
-                                       cb1.enabled, cb1.address, cb1.size, mesh_regs,
-                                       primitive_address);
-        }
+        if (capture_context) capture_stage(program, shader_info, shader_addr);
         shader_infos[index] = shader_info;
         unique_hashes[index] = shader_info->unique_hash;
         if (mesh && (program == Tegra::Engines::Maxwell3D::Regs::ShaderType::VertexB ||
